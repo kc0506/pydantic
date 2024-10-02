@@ -2,13 +2,9 @@
 
 from __future__ import annotations as _annotations
 
-import inspect
-import typing
-from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast, overload
 
 from ._internal import _typing_extra, _validate_call
-from .errors import PydanticErrorCodes, PydanticUserError
 
 __all__ = ('validate_call',)
 
@@ -18,54 +14,12 @@ if TYPE_CHECKING:
     AnyCallableT = TypeVar('AnyCallableT', bound=Callable[..., Any])
 
 
-def _check_function_type(function: object):
-    ERROR_CODE: PydanticErrorCodes = 'validate-call-type'
-
-    supported_types = typing.get_args(_validate_call.ValidateCallSupportedTypes)
-    if isinstance(function, supported_types):
-        try:
-            inspect.signature(cast(_validate_call.ValidateCallSupportedTypes, function))
-        except ValueError:
-            raise PydanticUserError(f"Input function `{function}` doesn't have a valid signature", code=ERROR_CODE)
-
-        if isinstance(function, partial):
-            try:
-                assert not isinstance(partial.func, partial), 'Partial of partial'
-                _check_function_type(function.func)
-            except PydanticUserError as e:
-                raise PydanticUserError(
-                    f'Partial of `{function.func}` is invalid because the type of `{function.func}` is not supported by `validate_call`',
-                    code=ERROR_CODE,
-                ) from e
-
-        return
-
-    if isinstance(function, (classmethod, staticmethod, property)):
-        name = type(function).__name__
-        raise PydanticUserError(
-            f'The `@{name}` decorator should be applied after `@validate_call` (put `@{name}` on top)', code=ERROR_CODE
-        )
-
-    if inspect.isclass(function):
-        raise PydanticUserError(
-            '`validate_call` should be applied to functions, not classes (put `@validate_call` on top of `__init__` or `__new__` instead)',
-            code=ERROR_CODE,
-        )
-    if callable(function):
-        raise PydanticUserError(
-            '`validate_call` should be applied to functions, not instances or other callables. Use `validate_call` explicitly on `__call__` instead.',
-            code=ERROR_CODE,
-        )
-
-    raise PydanticUserError(
-        '`validate_call` should be applied to one of the following: function, method, partial, or lambda',
-        code=ERROR_CODE,
-    )
-
-
 @overload
 def validate_call(
-    *, config: ConfigDict | None = None, validate_return: bool = False
+    *,
+    config: ConfigDict | None = None,
+    validate_return: bool = False,
+    use_overloads: bool = False,
 ) -> Callable[[AnyCallableT], AnyCallableT]: ...
 
 
@@ -79,6 +33,7 @@ def validate_call(
     *,
     config: ConfigDict | None = None,
     validate_return: bool = False,
+    use_overloads: bool = False,
 ) -> AnyCallableT | Callable[[AnyCallableT], AnyCallableT]:
     """Usage docs: https://docs.pydantic.dev/2.10/concepts/validation_decorator/
 
@@ -90,6 +45,7 @@ def validate_call(
         func: The function to be decorated.
         config: The configuration dictionary.
         validate_return: Whether to validate the return value.
+        use_overloads: Whether to validate against the annotations of overloads instead of that of the decorated function.
 
     Returns:
         The decorated function.
@@ -97,9 +53,8 @@ def validate_call(
     local_ns = _typing_extra.parent_frame_namespace()
 
     def validate(function: AnyCallableT) -> AnyCallableT:
-        _check_function_type(function)
         validate_call_wrapper = _validate_call.wrap_validate_call(
-            cast(_validate_call.ValidateCallSupportedTypes, function), config, validate_return, local_ns
+            cast(_validate_call.ValidateCallSupportedTypes, function), config, validate_return, local_ns, use_overloads
         )
         return validate_call_wrapper  # type: ignore
 

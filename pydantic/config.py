@@ -991,6 +991,8 @@ class ConfigDict(TypedDict, total=False):
         as the performance difference is minimal if repeated strings are rare.
     """
 
+    check_args_only: bool
+
 
 _TypeT = TypeVar('_TypeT', bound=type)
 

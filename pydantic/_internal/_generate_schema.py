@@ -1956,6 +1956,7 @@ class GenerateSchema:
             ),
             function,
             return_schema=return_schema,
+            check_args_only=self._config_wrapper.check_args_only,
         )
 
     def _unsubstituted_typevar_schema(self, typevar: typing.TypeVar) -> core_schema.CoreSchema:
