@@ -53,10 +53,10 @@ def validate_call(
     local_ns = _typing_extra.parent_frame_namespace()
 
     def validate(function: AnyCallableT) -> AnyCallableT:
-        validate_call_wrapper = _validate_call.wrap_validate_call(
-            cast(_validate_call.ValidateCallSupportedTypes, function), config, validate_return, local_ns, use_overloads
+        validate_call_wrapper = _validate_call.ValidateCallWrapper(
+            cast(_validate_call.ValidateCallSupportedTypes, function), config, validate_return, local_ns
         )
-        return validate_call_wrapper  # type: ignore
+        return _validate_call.update_wrapper(function, validate_call_wrapper.__call__)  # type: ignore
 
     if func is not None:
         return validate(func)

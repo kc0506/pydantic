@@ -1,0 +1,3 @@
+[submodule "pydantic-core"]
+	path = pydantic-core
+	url = https://github.com/kc0506/pydantic-core.git

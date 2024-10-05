@@ -1243,24 +1243,27 @@ except PydanticUserError as exc_info:
 
 ## Unsupported type for `validate_call` {#validate-call-type}
 
-`validate_call` has some limitations on the types it can validate. This error is raised when you try to use it with an unsupported type. Currently the supported types are:
-`LambdaType, FunctionType, MethodType, BuiltinFunctionType, BuiltinMethodType, functools.partial`. For the case of `functools.partial`, the function being partially applied must be one of the supported types.
+`validate_call` has some limitations on the callables it can validate. This error is raised when you try to use it with an unsupported callable. Currently the supported callables are functions (including lambdas), methods and instances of [`partial`][functools.partial]. In the case of [`partial`][functools.partial], the function being partially  applied must be one of the supported callables.
+
 
 ### `@classmethod`, `@staticmethod`, and `@property`
 
-These decorators cannot be put before `validate_call` because they return a class rather than one of the supported types. The correct way to use them is to put `validate_call` before the decorator.
+These decorators must be put before `validate_call`.
 
 ```py
-from pydantic import validate_call
+from pydantic import PydanticUserError, validate_call
 
 # error
 try:
+
     class A:
         @validate_call
         @classmethod
         def f1(cls): ...
+
 except PydanticUserError as exc_info:
     assert exc_info.code == 'validate-call-type'
+
 
 # correct
 @classmethod
@@ -1271,17 +1274,20 @@ def f2(cls): ...
 
 ### Classes
 
-To avoid ambiguity, `validate_call` should be applied to methods, not classes. If you want to validate the constructor of a class, you should put `validate_call` on top of `__init__` or `__new__` instead.
+While classes are callables themselves, `validate_call` can't be applied on them, as it needs to know about which method to use (`__init__` or `__new__`) to fetch type annotations. If you want to validate the constructor of a class, you should put `validate_call` on top of the appropriate method instead.
 
 ```py
-from pydantic import validate_call
+from pydantic import PydanticUserError, validate_call
 
 # error
 try:
+
     @validate_call
     class A1: ...
+
 except PydanticUserError as exc_info:
     assert exc_info.code == 'validate-call-type'
+
 
 # correct
 class A2:
@@ -1294,13 +1300,14 @@ class A2:
 
 ### Custom callable
 
-Although you can create custom callable types in Python with `__call__`, currently the instance of these types cannot be validated with `validate_call`. This may change in the future, but for now, you should use `validate_call` explicitly on `__call__` instead.
+Although you can create custom callable types in Python by implementing a `__call__` method, currently the instances of these types cannot be validated with `validate_call`. This may change in the future, but for now, you should use `validate_call` explicitly on `__call__` instead.
 
 ```py
-from pydantic import validate_call
+from pydantic import PydanticUserError, validate_call
 
 # error
 try:
+
     class A1:
         def __call__(self): ...
 
@@ -1308,6 +1315,7 @@ try:
 
 except PydanticUserError as exc_info:
     assert exc_info.code == 'validate-call-type'
+
 
 # correct
 class A2:
@@ -1320,9 +1328,10 @@ class A2:
 This is generally less common, but a possible reason is that you are trying to validate a method that doesn't have at least one argument (usually `self`).
 
 ```py
-from pydantic import validate_call
+from pydantic import PydanticUserError, validate_call
 
 try:
+
     class A:
         def f(): ...
 

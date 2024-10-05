@@ -105,7 +105,7 @@ from ._typing_extra import (
     is_zoneinfo_type,
 )
 from ._utils import lenient_issubclass, smart_deepcopy
-from ._validate_call import ValidateCallSupportedTypes
+from ._validate_call import VALIDATE_CALL_SUPPORTED_TYPES, ValidateCallSupportedTypes
 
 if TYPE_CHECKING:
     from ..fields import ComputedFieldInfo, FieldInfo
@@ -1024,7 +1024,7 @@ class GenerateSchema:
             return self.generate_schema(
                 self._get_first_arg_or_any(obj),
             )
-        elif any(isinstance(obj, t) for t in get_args(ValidateCallSupportedTypes)):
+        elif isinstance(obj, VALIDATE_CALL_SUPPORTED_TYPES):
             return self._call_schema(obj)
         elif inspect.isclass(obj) and issubclass(obj, Enum):
             return self._enum_schema(obj)
@@ -1904,7 +1904,10 @@ class GenerateSchema:
                 # Note: This was originally get by `_typing_extra.get_function_type_hints`,
                 #       but we switch to simply `p.annotation` to support bultins (e.g. `sorted`).
                 #       May need to revisit if anything breaks.
-                annotation = p.annotation
+                annotation = (
+                    _typing_extra._make_forward_ref(p.annotation) if isinstance(p.annotation, str) else p.annotation
+                )
+                annotation = self._resolve_forward_ref(annotation)
 
             parameter_mode = mode_lookup.get(p.kind)
             if parameter_mode is not None:
@@ -1956,7 +1959,7 @@ class GenerateSchema:
             ),
             function,
             return_schema=return_schema,
-            check_args_only=self._config_wrapper.check_args_only,
+            # check_args_only=self._config_wrapper.check_args_only,
         )
 
     def _unsubstituted_typevar_schema(self, typevar: typing.TypeVar) -> core_schema.CoreSchema:

@@ -4,18 +4,21 @@ import functools
 import inspect
 from functools import partial
 from types import BuiltinFunctionType, BuiltinMethodType, FunctionType, LambdaType, MethodType
-from typing import Any, Callable, Union, cast, get_args, get_overloads
+from typing import Any, Callable, TypedDict, Union, cast, get_args, get_overloads
 
 import pydantic_core
 
 from .. import ValidationError
 from ..config import ConfigDict
-from ..errors import PydanticErrorCodes, PydanticUserError
+from ..errors import PydanticUserError
 from ..plugin._schema_validator import PluggableSchemaValidator, create_schema_validator
 from . import _generate_schema, _typing_extra
 from ._config import ConfigWrapper
 
 # This should be aligned with `GenerateSchema.match_types`
+#
+# Note: This does not play very well with type checkers. For example,
+# `a: LambdaType = lambda x: x` will raise a type error by Pyright.
 ValidateCallSupportedTypes = Union[
     LambdaType,
     FunctionType,
@@ -24,6 +27,8 @@ ValidateCallSupportedTypes = Union[
     BuiltinMethodType,
     functools.partial,
 ]
+
+VALIDATE_CALL_SUPPORTED_TYPES = get_args(ValidateCallSupportedTypes)
 
 
 def get_name(func: ValidateCallSupportedTypes) -> str:
@@ -35,10 +40,9 @@ def get_qualname(func: ValidateCallSupportedTypes) -> str:
 
 
 def _check_function_type(function: object):
-    ERROR_CODE: PydanticErrorCodes = 'validate-call-type'
+    ERROR_CODE = 'validate-call-type'
 
-    supported_types = get_args(ValidateCallSupportedTypes)
-    if isinstance(function, supported_types):
+    if isinstance(function, VALIDATE_CALL_SUPPORTED_TYPES):
         try:
             inspect.signature(cast(ValidateCallSupportedTypes, function))
         except ValueError:
@@ -64,24 +68,24 @@ def _check_function_type(function: object):
 
     if inspect.isclass(function):
         raise PydanticUserError(
-            '`validate_call` should be applied to functions, not classes (put `@validate_call` on top of `__init__` or `__new__` instead)',
+            f'Unable to validate {function}: `validate_call` should be applied to functions, not classes (put `@validate_call` on top of `__init__` or `__new__` instead)',
             code=ERROR_CODE,
         )
     if callable(function):
         raise PydanticUserError(
-            '`validate_call` should be applied to functions, not instances or other callables. Use `validate_call` explicitly on `__call__` instead.',
+            f'Unable to validate {function}: `validate_call` should be applied to functions, not instances or other callables. Use `validate_call` explicitly on `__call__` instead.',
             code=ERROR_CODE,
         )
 
     raise PydanticUserError(
-        '`validate_call` should be applied to one of the following: function, method, partial, or lambda',
+        f'Unable to validate {function}: `validate_call` should be applied to one of the following: function, method, partial, or lambda',
         code=ERROR_CODE,
     )
 
 
-def _update_wrapper(wrapped: ValidateCallSupportedTypes, wrapper: Callable[..., Any]):
+def update_wrapper(wrapped: ValidateCallSupportedTypes, wrapper: Callable[..., Any]):
     if inspect.iscoroutinefunction(wrapped):
-
+        # We have to create a new couroutine function
         @functools.wraps(wrapped)
         async def wrapper_function(*args, **kwargs):  # type: ignore
             return await wrapper(*args, **kwargs)
@@ -94,6 +98,7 @@ def _update_wrapper(wrapped: ValidateCallSupportedTypes, wrapper: Callable[..., 
     # We need to manually update this because `partial` object has no `__name__` and `__qualname__`.
     wrapper_function.__name__ = get_name(wrapped)
     wrapper_function.__qualname__ = get_qualname(wrapped)
+    wrapper_function.raw_function = wrapped  # type: ignore
 
     return wrapper_function
 
@@ -151,9 +156,7 @@ def _create_wrapper(
 
         return res
 
-    wrapper_function = _update_wrapper(function, wrapper)
-    wrapper_function.raw_function = function  # type: ignore
-    return wrapper_function
+    return wrapper
 
 
 def _get_return_annotation(func: Callable) -> Any:
@@ -161,7 +164,27 @@ def _get_return_annotation(func: Callable) -> Any:
     return signature.return_annotation if signature.return_annotation is not signature.empty else Any
 
 
-def wrap_validate_call(
+class _WrapInfo(TypedDict):
+    module: str
+    name: str
+    qualname: str
+    schema_type: Any
+
+
+def _get_wrap_info(function: ValidateCallSupportedTypes) -> _WrapInfo:
+    name = get_name(function)
+    qualname = get_qualname(function)
+    if isinstance(function, partial):
+        schema_type = function.func
+        module = function.func.__module__
+    else:
+        schema_type = function
+        module = function.__module__
+
+    return _WrapInfo(module=module, name=name, qualname=qualname, schema_type=schema_type)
+
+
+def _wrap_validate_call(
     function: ValidateCallSupportedTypes,
     config: ConfigDict | None,
     validate_return: bool,
@@ -170,31 +193,28 @@ def wrap_validate_call(
 ):
     _check_function_type(function)
 
-    if isinstance(function, partial):
-        schema_type = function.func
-        module = function.func.__module__
-    else:
-        schema_type = function
-        module = function.__module__
-    qualname = core_config_title = get_qualname(function)
+    wrap_info = _get_wrap_info(function)
 
     global_ns = _typing_extra.get_module_ns_of(function)
     # TODO: this is a bit of a hack, we should probably have a better way to handle this
     # specifically, we shouldn't be pumping the namespace full of type_params
     # when we take namespace and type_params arguments in eval_type_backport
-    type_params = (namespace or {}).get('__type_params__', ()) + getattr(schema_type, '__type_params__', ())
+    type_params = (namespace or {}).get('__type_params__', ()) + getattr(
+        wrap_info['schema_type'], '__type_params__', ()
+    )
     namespace = {
         **{param.__name__: param for param in type_params},
         **(global_ns or {}),
         **(namespace or {}),
     }
+
     config_wrapper = ConfigWrapper(config)
-    core_config = config_wrapper.core_config(core_config_title)
+    core_config = config_wrapper.core_config(wrap_info['qualname'])
     create_validator = partial(
         create_schema_validator,
-        schema_type=schema_type,
-        schema_type_module=module,
-        schema_type_name=qualname,
+        schema_type=wrap_info['schema_type'],
+        schema_type_module=wrap_info['module'],
+        schema_type_name=wrap_info['qualname'],
         schema_kind='validate_call',
         config=core_config,
         plugin_settings=config_wrapper.plugin_settings,
@@ -235,3 +255,36 @@ def wrap_validate_call(
     return _create_wrapper(
         function, function_validator, return_validator, overload_args_validators, overload_return_validators
     )
+
+
+class ValidateCallWrapper:
+    """This is a wrapper around a function that validates the arguments passed to it, and optionally the return value."""
+
+    # This slots are not currently used, but in the future we may want to expose them.
+    # See #9883
+    __slots__ = (
+        '__pydantic_validator__',
+        '__name__',
+        '__qualname__',
+        '__annotations__',
+        '__dict__',  # required for __module__
+    )
+
+    def __init__(
+        self,
+        function: ValidateCallSupportedTypes,
+        config: ConfigDict | None,
+        validate_return: bool,
+        namespace: dict[str, Any] | None,
+    ):
+        _check_function_type(function)
+        wrap_info = _get_wrap_info(function)
+
+        self.__name__ = wrap_info['name']
+        self.__qualname__ = wrap_info['qualname']
+        self.__module__ = wrap_info['module']
+
+        self.__pydantic_validator__ = _wrap_validate_call(function, config, validate_return, namespace)
+
+    def __call__(self, *args, **kwargs) -> Any:
+        return self.__pydantic_validator__(*args, **kwargs)
