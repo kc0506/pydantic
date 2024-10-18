@@ -1,19 +1,21 @@
 from __future__ import annotations as _annotations
 
+import contextlib
 import functools
 import inspect
 from functools import partial
 from types import BuiltinFunctionType, BuiltinMethodType, FunctionType, LambdaType, MethodType
-from typing import Any, Awaitable, Callable, Union, cast, get_args
+from typing import Any, Awaitable, Callable, Mapping, Self, Union, cast, get_args
 
 from pydantic_core import ArgsKwargs, SchemaValidator
 from typing_extensions import ParamSpec, TypeVar, TypeVarTuple
 
 from ..config import ConfigDict
+from ..errors import PydanticUserError
 from ..plugin._schema_validator import PluggableSchemaValidator, create_schema_validator
-from . import _generate_schema
+from . import _generate_schema, _generics, _typing_extra
 from ._config import ConfigWrapper
-from ._namespace_utils import MappingNamespace, NsResolver, ns_for_function
+from ._namespace_utils import MappingNamespace, NamespacesTuple, NsResolver, ns_for_function
 
 
 def extract_function_name(func: ValidateCallSupportedTypes) -> str:
@@ -24,6 +26,42 @@ def extract_function_name(func: ValidateCallSupportedTypes) -> str:
 def extract_function_qualname(func: ValidateCallSupportedTypes) -> str:
     """Extract the qualname of a `ValidateCallSupportedTypes` object."""
     return f'partial({func.func.__qualname__})' if isinstance(func, functools.partial) else func.__qualname__
+
+
+@contextlib.contextmanager
+def _suppress_invalid_self_error(lenient: bool):
+    try:
+        yield
+    except PydanticUserError as e:
+        if lenient and e.code == 'invalid-self-type':
+            return
+        raise
+
+
+@contextlib.contextmanager
+def _apply_type_map(func: ValidateCallSupportedTypes, namespaces: NamespacesTuple, type_map: Mapping[Any, Any]):
+    original_annotations = func.__annotations__
+    original_qualname = func.__qualname__
+    original_signature = inspect.signature(func)
+
+    func.__annotations__ = original_annotations.copy()
+    func.__dict__.pop('__signature__', None)
+    # _update_qualname(func, model)
+
+    for name, annotation in func.__annotations__.items():
+        evaluated_annotation = _typing_extra.eval_type(
+            annotation,
+            *namespaces,
+            # lenient=True,
+        )
+
+        func.__annotations__[name] = _generics.replace_types(evaluated_annotation, type_map)
+
+    yield func
+
+    func.__annotations__ = original_annotations
+    func.__qualname__ = original_qualname  # type: ignore
+    func.__signature__ = original_signature  # type: ignore
 
 
 _UNBOUND = object()
@@ -53,6 +91,7 @@ class ValidateCallWrapper:
         'config',
         'validate_return',
         'parent_namespace',
+        'inside_classdef',
         'bound_self',
         '_repr_dummy',
         #
@@ -69,13 +108,14 @@ class ValidateCallWrapper:
     # # TODO: test this
     __type_params__: tuple[TypeVar | ParamSpec | TypeVarTuple, ...] | None
 
-    __pydantic_validator__: SchemaValidator | PluggableSchemaValidator
+    __pydantic_validator__: SchemaValidator | PluggableSchemaValidator | None
     __return_pydantic_validator__: Callable[[Any], Any] | None
 
     raw_function: ValidateCallSupportedTypes
     config: ConfigDict | None
     validate_return: bool
     parent_namespace: MappingNamespace | None
+    inside_classdef: bool
     bound_self: Any
     _generate_validator: Callable[[Any], SchemaValidator | PluggableSchemaValidator]
     _repr_dummy: Callable
@@ -89,6 +129,7 @@ class ValidateCallWrapper:
         config: ConfigDict | None,
         validate_return: bool,
         parent_namespace: MappingNamespace | None,
+        inside_classdef: bool,
         bound_self: Any = _UNBOUND,
     ) -> None:
         if isinstance(function, partial):
@@ -111,6 +152,7 @@ class ValidateCallWrapper:
         self.config = config
         self.validate_return = validate_return
         self.parent_namespace = parent_namespace
+        self.inside_classdef = inside_classdef
         self.bound_self = bound_self
         self._repr_dummy = functools.wraps(self)(lambda: ...)
 
@@ -140,28 +182,56 @@ class ValidateCallWrapper:
             )
 
         self._generate_validator = generate_validator
-        self._build_validators()
+        self.__pydantic_validator__ = None
+        self.__return_pydantic_validator__ = None
+        self._build_validators(lenient_self=inside_classdef)
 
-    def _build_validators(self) -> None:
-        self.__pydantic_validator__ = self._generate_validator(self.raw_function)
+    @property
+    def _complete(self):
+        return self.__pydantic_validator__ is not None and (
+            not self.validate_return or self.__return_pydantic_validator__ is not None
+        )
+
+    def _build_validators(self, lenient_self: bool = False) -> None:
+        with _suppress_invalid_self_error(lenient_self):
+            self.__pydantic_validator__ = self._generate_validator(self.raw_function)
 
         self.__return_pydantic_validator__ = None
         if self.validate_return:
             signature = inspect.signature(self.raw_function)
             return_type = signature.return_annotation if signature.return_annotation is not signature.empty else Any
 
-            validator = self._generate_validator(return_type)
+            with _suppress_invalid_self_error(lenient_self):
+                validator = self._generate_validator(return_type)
 
-            if inspect.iscoroutinefunction(self.raw_function):
+                if inspect.iscoroutinefunction(self.raw_function):
 
-                async def return_val_wrapper(aw: Awaitable[Any]) -> None:
-                    return validator.validate_python(await aw)
+                    async def return_val_wrapper(aw: Awaitable[Any]) -> None:
+                        return validator.validate_python(await aw)
 
-                self.__return_pydantic_validator__ = return_val_wrapper
-            else:
-                self.__return_pydantic_validator__ = validator.validate_python
+                    self.__return_pydantic_validator__ = return_val_wrapper
+                else:
+                    self.__return_pydantic_validator__ = validator.validate_python
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        # TODO: overload?
+        # TODO: arg named `self`?
+        if not self._complete:
+            # if self._owner is not None:
+            # contextlib.nullcontext
+            namespaces = NamespacesTuple(_typing_extra.get_module_ns_of(self._owner), self.parent_namespace or {})
+            update_func = (
+                _apply_type_map(self.raw_function, namespaces, {Self: self._owner})
+                if self._owner is not None
+                else contextlib.nullcontext(self.raw_function)
+            )
+            # print(self._owner)
+            with update_func as func:
+                self.raw_function = func
+                self._build_validators()
+
+        assert self.__pydantic_validator__ is not None
+
         if self.bound_self is not _UNBOUND:
             args = (self.bound_self, *args)
 
@@ -174,22 +244,26 @@ class ValidateCallWrapper:
     def __get__(self, obj: Any, objtype: type[Any] | None = None) -> ValidateCallWrapper:
         """Bind the raw function and return another ValidateCallWrapper wrapping that."""
         objtype = objtype or cast(type, obj.__class__)
+        # print('GET', obj, objtype)
+        # breakpoint()
+
+        if self._name is None:
+            # TODO: test this
+            self._name = extract_function_name(self.raw_function)
+
+        if self._owner is None:
+            self._owner = objtype
+
         if obj is None:
             # It's possible this wrapper is dynamically applied to a class attribute not allowing
             # name to be populated by __set_name__. In this case, we'll manually acquire the name
             # from the function reference.
-            if self._name is None:
-                # TODO: test this
-                self._name = extract_function_name(self.raw_function)
             try:
                 # Handle the case where a method is accessed as a class attribute
                 return objtype.__getattribute__(objtype, self._name)  # type: ignore
             except AttributeError:
                 # This will happen the first time the attribute is accessed
                 pass
-
-        if self._owner is None:
-            self._owner = objtype
 
         # bound_func = cast(Callable, self.raw_function).__get__(obj, objtype)
         validated_func = self.__class__(
@@ -199,6 +273,7 @@ class ValidateCallWrapper:
             self.validate_return,
             self.parent_namespace,
             # ! WARNING: This cannot deal with staticmethod (although it is currently banned from here)
+            self.inside_classdef,
             obj if obj is not None else _UNBOUND,
         )
 
@@ -216,7 +291,7 @@ class ValidateCallWrapper:
         if self._name is not None:
             if obj is None:
                 object.__setattr__(objtype, self._name, validated_func)
-            elif objtype is self._owner:
+            elif obj is not objtype and objtype is self._owner:
                 object.__setattr__(obj, self._name, validated_func)
         return validated_func
 

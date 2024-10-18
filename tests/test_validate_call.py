@@ -2,11 +2,13 @@ import asyncio
 import inspect
 import re
 import sys
+import typing
 from datetime import datetime, timezone
 from functools import partial
 from typing import Any, List, Literal, Tuple, Union, cast
 
 import pytest
+import typing_extensions
 from pydantic_core import ArgsKwargs
 from typing_extensions import Annotated, Required, TypedDict, Unpack
 
@@ -24,6 +26,21 @@ from pydantic import (
     with_config,
 )
 from pydantic._internal import _validate_call
+
+
+# Borrowed from `test_types_self`
+@pytest.fixture(
+    name='Self',
+    params=[
+        pytest.param(typing, id='typing.Self'),
+        pytest.param(typing_extensions, id='t_e.Self'),
+    ],
+)
+def fixture_self_all(request):
+    try:
+        return request.param.Self
+    except AttributeError:
+        pytest.skip(f'Self is not available from {request.param}')
 
 
 def check_repr(func1, func2):
@@ -1314,3 +1331,47 @@ def test_uses_local_ns():
         assert bar({'z': 1}) == M2(z=1)
 
     foo()
+
+
+def test_type_self(Self):
+    # Note: `self` and `cls` will be passed to validators
+
+    class A:
+        @classmethod
+        @validate_call
+        def f(cls: type[Self], x: int):
+            return x
+
+        @validate_call(validate_return=True)
+        def get_type(self) -> type[Self]:
+            return type(self)
+
+    class SubA(A):
+        pass
+
+    assert A.f('1') == 1
+    assert A().f('1') == 1
+    assert A().get_type() == A
+
+    assert SubA.f('1') == 1
+    assert SubA().f('1') == 1
+    assert SubA().get_type() == SubA
+
+
+def test_self(Self):
+    # Note: `self` and `cls` will be passed to validators
+
+    class A(BaseModel):
+        a: int
+
+        @validate_call
+        def f(self: Self, x: int):
+            return x
+
+        @classmethod
+        @validate_call(validate_return=True)
+        def factory(cls: type[Self], x: int) -> Self:
+            return {'a': x}
+
+    assert A(a=1).f('1') == 1
+    assert A.factory('1') == A(a=1)

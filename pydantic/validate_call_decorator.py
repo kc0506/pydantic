@@ -6,7 +6,7 @@ import inspect
 from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast, overload
 
-from ._internal import _typing_extra, _validate_call
+from ._internal import _typing_extra, _utils, _validate_call
 from .errors import PydanticUserError
 
 __all__ = ('validate_call',)
@@ -98,6 +98,9 @@ def validate_call(
         The decorated function.
     """
     parent_namespace = _typing_extra.parent_frame_namespace()
+    inside_classdef = _utils.is_classdef(
+        cur_frame.f_back if (cur_frame := inspect.currentframe()) is not None else None
+    )
 
     def validate(function: AnyCallableT) -> AnyCallableT:
         _check_function_type(function)
@@ -106,6 +109,7 @@ def validate_call(
             config,
             validate_return,
             parent_namespace,
+            inside_classdef,
         )
         return cast(Any, validate_call_wrapper)
 

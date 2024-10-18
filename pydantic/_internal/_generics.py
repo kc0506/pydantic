@@ -258,7 +258,7 @@ def replace_types(type_: Any, type_map: Mapping[Any, Any] | None) -> Any:
 
     Returns:
         A new type representing the basic structure of `type_` with all
-        `typevar_map` keys recursively replaced.
+        `type_map` keys recursively replaced.
 
     Example:
         ```py

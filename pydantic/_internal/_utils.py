@@ -6,13 +6,15 @@ This should be reduced as much as possible with functions only used in one place
 from __future__ import annotations as _annotations
 
 import dataclasses
+import inspect
 import keyword
+import re
 import typing
 import weakref
 from collections import OrderedDict, defaultdict, deque
 from copy import deepcopy
 from itertools import zip_longest
-from types import BuiltinFunctionType, CodeType, FunctionType, GeneratorType, LambdaType, ModuleType
+from types import BuiltinFunctionType, CodeType, FrameType, FunctionType, GeneratorType, LambdaType, ModuleType
 from typing import Any, Mapping, TypeVar
 
 from typing_extensions import TypeAlias, TypeGuard
@@ -361,3 +363,17 @@ class SafeGetItemProxy:
 
         def __contains__(self, key: str, /) -> bool:
             return self.wrapped.__contains__(key)
+
+
+def is_classdef(frame: FrameType | None) -> bool:
+    if frame is None:
+        return False
+
+    lines = inspect.findsource(frame)[0]
+    first_line = lines[frame.f_code.co_firstlineno - 1]
+    if first_line.lstrip().startswith('class '):
+        class_name = frame.f_code.co_name
+        assert re.match(r'\s*class\s+' + class_name, first_line), (class_name, first_line)
+        return True
+
+    return False
